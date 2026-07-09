@@ -32,7 +32,6 @@
   }
   .app { width: 100%; max-width: 640px; padding: 12px 12px 24px; }
 
-  /* Status strip */
   header {
     display: flex; align-items: baseline; justify-content: space-between;
     gap: 8px; padding: 6px 2px 10px; border-bottom: 1px solid var(--line);
@@ -44,10 +43,10 @@
   .stamp small { color: var(--amber); font-size: 22px; }
   .meters { display: flex; gap: 14px; font-size: 12px; color: var(--dust); white-space: nowrap; }
   .meters b { color: var(--text); font-weight: 600; }
+  .role { font-size: 10px; letter-spacing: 2px; color: var(--amber); padding: 4px 2px 0; }
 
-  /* Transmission bar — the signature element */
   .tx {
-    margin: 14px 0 12px; padding: 10px 12px;
+    margin: 12px 0; padding: 10px 12px;
     background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--amber);
     min-height: 58px;
   }
@@ -60,7 +59,24 @@
   @keyframes blink { 50% { opacity: 0; } }
   .tx.idle .line { color: var(--dust); text-shadow: none; font-size: 20px; padding-top: 5px; }
 
-  /* Board */
+  /* Clue form (human spymaster mode) */
+  .clueform { display: none; gap: 8px; margin: 0 0 12px; }
+  .clueform.show { display: flex; }
+  .clueform input {
+    flex: 1; min-width: 0; background: var(--panel); border: 1px solid var(--line);
+    color: var(--amber); font-family: "Staatliches", sans-serif; font-size: 22px;
+    letter-spacing: 2px; padding: 8px 10px; border-radius: 3px; text-transform: uppercase;
+  }
+  .clueform select {
+    background: var(--panel); border: 1px solid var(--line); color: var(--amber);
+    font-family: "Staatliches", sans-serif; font-size: 22px; padding: 8px; border-radius: 3px;
+  }
+  .clueform button {
+    padding: 8px 14px; font-family: "Staatliches", sans-serif; font-size: 18px;
+    letter-spacing: 2px; background: var(--amber); color: #1B1409;
+    border: 0; border-radius: 3px; cursor: pointer;
+  }
+
   .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; }
   .card { perspective: 600px; height: 62px; }
   .card button {
@@ -86,7 +102,11 @@
   .face .sym { font-size: 15px; line-height: 1; }
   .card.dim .face.front { opacity: 0.55; }
 
-  /* Controls + log */
+  /* Spymaster key marks on unrevealed cards */
+  .card.key-agent .face.front { border-bottom-color: var(--agent); box-shadow: inset 0 -3px 0 var(--agent); }
+  .card.key-assassin .face.front { border-bottom-color: var(--seal); box-shadow: inset 0 -3px 0 var(--seal); background: #E3D3C4; }
+  .card.key-neutral .face.front { opacity: 0.9; }
+
   .controls { display: flex; gap: 8px; margin-top: 12px; }
   .controls button {
     flex: 1; padding: 10px; font-family: "Staatliches", sans-serif; font-size: 17px;
@@ -99,7 +119,6 @@
   .log div { padding: 2px 0; }
   .log div:last-child { color: var(--text); }
 
-  /* End-of-game banner */
   .banner {
     display: none; margin: 14px 0 0; padding: 14px; text-align: center;
     font-family: "Staatliches", sans-serif; font-size: 26px; letter-spacing: 3px;
@@ -126,10 +145,17 @@
       <span>CLUES <b id="turns">–</b></span>
     </div>
   </header>
+  <div class="role" id="role"></div>
 
   <div class="tx idle" id="tx">
-    <div class="label">TRANSMISSION FROM SPYMASTER</div>
+    <div class="label" id="txlabel">TRANSMISSION FROM SPYMASTER</div>
     <div class="line" id="txline">awaiting clue…<span class="cursor">▌</span></div>
+  </div>
+
+  <div class="clueform" id="clueform">
+    <input id="cluein" type="text" placeholder="YOUR CLUE" maxlength="40" autocomplete="off">
+    <select id="countin"></select>
+    <button id="transmit">SEND</button>
   </div>
 
   <div class="banner" id="banner"></div>
@@ -147,11 +173,18 @@
   const code = decodeURIComponent(location.pathname.split("/").pop() || "");
   const $ = (id) => document.getElementById(id);
   const SYM = { agent: "★", neutral: "○", assassin: "☠" };
-  const NAME = { agent: "AGENT", neutral: "BYSTANDER", assassin: "ASSASSIN" };
+
+  const sel = $("countin");
+  for (let i = 0; i <= 9; i++) {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = i === 0 ? "∞" : i;
+    if (i === 2) o.selected = true;
+    sel.appendChild(o);
+  }
 
   let state = null;
-  let armed = null;          // word selected but not confirmed
-  let shownClue = "";        // last clue rendered in the transmission bar
+  let armed = null;
+  let shownClue = "";
   let typing = false;
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -174,34 +207,44 @@
 
   function render() {
     if (!state) return;
+    const iAmSpymaster = state.mode === "human_spymaster";
+    const playing = state.phase === "guessing";
+    const over = state.phase === "won" || state.phase === "lost";
+
     $("agents").textContent = state.agentsLeft;
     $("turns").textContent = (state.turnLimit - state.turn + 1) + "/" + state.turnLimit;
+    $("role").textContent = iAmSpymaster
+      ? "YOU ARE THE SPYMASTER — CLAUDE GUESSES"
+      : "CLAUDE IS THE SPYMASTER — YOU GUESS";
+    $("txlabel").textContent = iAmSpymaster ? "YOUR TRANSMISSION" : "TRANSMISSION FROM SPYMASTER";
 
-    // Transmission bar
     const clue = state.clue;
-    const playing = state.phase === "guessing";
     if (clue && playing) {
       const text = clue.word + " · " + (clue.count === 0 ? "∞" : clue.count);
       if (text !== shownClue) { shownClue = text; typeClue(text); }
     } else if (!typing) {
       shownClue = "";
       $("tx").classList.add("idle");
-      $("txline").innerHTML =
-        (state.phase === "awaiting_clue" ? "spymaster is thinking…" : "transmission ended") +
-        '<span class="cursor">▌</span>';
+      let idle;
+      if (over) idle = "transmission ended";
+      else if (iAmSpymaster) idle = "compose your clue below…";
+      else idle = "spymaster is thinking…";
+      $("txline").innerHTML = idle + '<span class="cursor">▌</span>';
     }
 
-    // Board
+    $("clueform").className = "clueform" + (iAmSpymaster && state.phase === "awaiting_clue" ? " show" : "");
+
     const grid = $("grid");
     grid.innerHTML = "";
-    const over = state.phase === "won" || state.phase === "lost";
     state.board.forEach((c) => {
       const cell = document.createElement("div");
-      cell.className = "card" + (c.revealed || over ? " revealed" : "");
-      if (armed === c.word) cell.className += " armed";
-      if (over && !c.revealed && c.identity === "neutral") cell.className += " dim";
+      let cls = "card" + (c.revealed || over ? " revealed" : "");
+      if (armed === c.word) cls += " armed";
+      if (iAmSpymaster && !c.revealed && !over && c.identity) cls += " key-" + c.identity;
+      if (over && !c.revealed && c.identity === "neutral") cls += " dim";
+      cell.className = cls;
       const btn = document.createElement("button");
-      btn.disabled = c.revealed || !playing;
+      btn.disabled = c.revealed || !playing || iAmSpymaster;
       btn.setAttribute("aria-label", c.word);
       const front = document.createElement("div");
       front.className = "face front";
@@ -210,30 +253,33 @@
       back.className = "face back " + (c.identity || "");
       if (c.identity) back.innerHTML = '<span class="sym">' + SYM[c.identity] + "</span>" + c.word;
       btn.append(front, back);
-      btn.addEventListener("click", () => onTap(c.word));
+      if (!iAmSpymaster) btn.addEventListener("click", () => onTap(c.word));
       cell.appendChild(btn);
       grid.appendChild(cell);
     });
 
-    // Controls + hint
-    $("pass").disabled = !playing;
-    $("hint").textContent = playing
-      ? (armed ? "Tap " + armed + " again to confirm." :
-         "Guesses left: " + state.guessesLeft + ". Tap a word, tap again to confirm.")
-      : (state.phase === "awaiting_clue" ? "Go back to your chat — tell Claude the turn is over." : "");
+    $("pass").style.display = iAmSpymaster ? "none" : "";
+    $("pass").disabled = !playing || iAmSpymaster;
+    if (iAmSpymaster) {
+      $("hint").textContent = playing
+        ? "Claude is guessing — watch the board. Guesses left: " + state.guessesLeft
+        : (state.phase === "awaiting_clue" ? "Colored edges are your key: green = agent, red = assassin. Send a clue, then tell Claude in the chat." : "");
+    } else {
+      $("hint").textContent = playing
+        ? (armed ? "Tap " + armed + " again to confirm." :
+           "Guesses left: " + state.guessesLeft + ". Tap a word, tap again to confirm.")
+        : (state.phase === "awaiting_clue" ? "Go back to your chat — tell Claude the turn is over." : "");
+    }
 
-    // Banner
     const b = $("banner");
     b.className = "banner" + (over ? " " + state.phase : "");
     if (state.phase === "won") {
-      b.innerHTML = "MISSION ACCOMPLISHED<small>All agents extracted. Ask Claude for a rematch.</small>";
+      b.innerHTML = "MISSION ACCOMPLISHED<small>All agents extracted.</small>";
     } else if (state.phase === "lost") {
       b.innerHTML = "MISSION FAILED<small>" +
-        (state.lostTo ? state.lostTo + " was the assassin." : "Out of clues.") +
-        " Ask Claude for a rematch.</small>";
+        (state.lostTo ? state.lostTo + " was the assassin." : "Out of clues.") + "</small>";
     }
 
-    // Log
     $("log").innerHTML = state.log.map((l) => "<div>" + l.replace(/</g, "&lt;") + "</div>").join("");
   }
 
@@ -261,10 +307,24 @@
       .catch((e) => { $("hint").textContent = e.message; });
   });
 
+  function sendClue() {
+    const clue = $("cluein").value.trim();
+    if (!clue) { $("hint").textContent = "Type a clue word first."; return; }
+    api("/clue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clue, count: parseInt(sel.value, 10) }),
+    }).then((s) => {
+      state = s; $("cluein").value = ""; render();
+      $("hint").textContent = "Clue transmitted. Now tell Claude in the chat that it's up!";
+    }).catch((e) => { $("hint").textContent = e.message; });
+  }
+  $("transmit").addEventListener("click", sendClue);
+  $("cluein").addEventListener("keydown", (e) => { if (e.key === "Enter") sendClue(); });
+
   async function poll() {
     try {
       const s = await api("");
-      // Avoid clobbering an armed selection unless the world changed.
       const changed = JSON.stringify(s) !== JSON.stringify(state);
       state = s;
       if (changed) render();

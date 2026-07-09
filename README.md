@@ -1,6 +1,6 @@
 # codenames-mcp-server
 
-Play Codenames **with** your Claude — not against a bot, and not against an API call. The Claude instance in your chat is the spymaster: it sees the hidden key through MCP tools and gives you one-word clues. You guess on a live board in your browser. Every clue is a genuine decision by the model you're mid-conversation with.
+Play Codenames **with** your Claude — not against a bot, and not against an API call. In classic mode, the Claude instance in your chat is the spymaster: it sees the hidden key through MCP tools and gives you one-word clues while you guess on a live board in your browser. In **reversed mode**, you are the spymaster: your browser shows you the key and a clue form, and Claude does the guessing — the server never sends Claude the key, so its deductions are provably genuine.
 
 One small Node server does both jobs: it speaks MCP to Claude on `/mcp` and serves the human's board on `/room/<CODE>`.
 
@@ -60,10 +60,14 @@ fly deploy
 
 | Tool | Purpose |
 | --- | --- |
-| `codenames_create_room` | New room + board; returns the spymaster key and join URL. Options: `agents`, `assassins`, `turn_limit`. |
-| `codenames_get_state` | Full spymaster view: phase, board with identities, log. |
-| `codenames_give_clue` | Post a clue (`clue`, `count`; `count: 0` = unlimited guesses). Validated against board words. |
-| `codenames_restart` | Fresh board, same room code/URL. |
+| `codenames_create_room` | New room + board; returns the join URL. Options: `agents`, `assassins`, `turn_limit`, and `my_role` (`"spymaster"` default, `"guesser"` for reversed mode). |
+| `codenames_get_state` | Role-aware view: includes the key only when Claude is spymaster. |
+| `codenames_give_clue` | (Claude as spymaster) Post a clue (`clue`, `count`; `count: 0` = unlimited). Validated against board words. |
+| `codenames_guess` | (Claude as guesser) Guess one board word against the human's clue. |
+| `codenames_pass` | (Claude as guesser) Stop guessing and hand the turn back. |
+| `codenames_restart` | Fresh board, same room code/URL; `my_role` here swaps who is spymaster. |
+
+In reversed mode the human's board shows the key as colored card edges (green = agent, red = assassin) plus a clue form; ask Claude to *"restart the room with you as guesser"* to swap roles mid-session.
 
 ## Notes and limits
 

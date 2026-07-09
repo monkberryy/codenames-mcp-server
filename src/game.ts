@@ -2,6 +2,8 @@ import { WORD_POOL, generateRoomCode } from "./words.js";
 
 export type Identity = "agent" | "neutral" | "assassin";
 export type Phase = "awaiting_clue" | "guessing" | "won" | "lost";
+/** Who holds the key: Claude (classic) or the human (reversed). */
+export type Mode = "claude_spymaster" | "human_spymaster";
 
 export interface Card {
   word: string;
@@ -17,14 +19,15 @@ export interface Clue {
 
 export interface Room {
   code: string;
+  mode: Mode;
   cards: Card[];
   clues: Clue[];
   phase: Phase;
-  turn: number; // 1-based index of the current clue turn
+  turn: number;
   turnLimit: number;
-  guessesLeft: number; // Infinity when clue count is 0
+  guessesLeft: number;
   log: string[];
-  lostTo?: string; // the assassin word, if the game was lost that way
+  lostTo?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -33,6 +36,7 @@ export interface GameConfig {
   agents?: number;
   assassins?: number;
   turnLimit?: number;
+  mode?: Mode;
 }
 
 const DEFAULTS = { agents: 9, assassins: 2, turnLimit: 8 } as const;
@@ -76,7 +80,7 @@ function buildBoard(agents: number, assassins: number): Card[] {
   return words.map((word, i) => ({ word, identity: shuffled[i], revealed: false }));
 }
 
-export function createRoom(config: GameConfig = {}): Room {
+function freshState(room: Room, config: GameConfig): void {
   const agents = config.agents ?? DEFAULTS.agents;
   const assassins = config.assassins ?? DEFAULTS.assassins;
   const turnLimit = config.turnLimit ?? DEFAULTS.turnLimit;
@@ -85,31 +89,6 @@ export function createRoom(config: GameConfig = {}): Room {
       `Invalid config: need agents >= 1, assassins >= 0, agents + assassins <= ${BOARD_SIZE - 1}.`
     );
   }
-  const code = generateRoomCode((c) => rooms.has(c));
-  const now = Date.now();
-  const room: Room = {
-    code,
-    cards: buildBoard(agents, assassins),
-    clues: [],
-    phase: "awaiting_clue",
-    turn: 1,
-    turnLimit,
-    guessesLeft: 0,
-    log: [`Room ${code} created. ${agents} agents to find, ${assassins} assassin(s) on the board, ${turnLimit} clues available.`],
-    createdAt: now,
-    updatedAt: now,
-  };
-  rooms.set(code, room);
-  return room;
-}
-
-/** Starts a fresh game on an existing room (same code/URL for the human). */
-export function restartRoom(code: string, config: GameConfig = {}): Room {
-  const room = getRoom(code);
-  if (!room) throw new Error(`Room ${code} not found.`);
-  const agents = config.agents ?? DEFAULTS.agents;
-  const assassins = config.assassins ?? DEFAULTS.assassins;
-  const turnLimit = config.turnLimit ?? DEFAULTS.turnLimit;
   room.cards = buildBoard(agents, assassins);
   room.clues = [];
   room.phase = "awaiting_clue";
@@ -117,7 +96,32 @@ export function restartRoom(code: string, config: GameConfig = {}): Room {
   room.turnLimit = turnLimit;
   room.guessesLeft = 0;
   room.lostTo = undefined;
-  room.log = [`New game started in room ${code}. ${agents} agents, ${assassins} assassin(s), ${turnLimit} clues.`];
+  const who = room.mode === "claude_spymaster" ? "Claude is the spymaster" : "The human is the spymaster";
+  room.log = [
+    `Room ${room.code}: ${who}. ${agents} agents, ${assassins} assassin(s), ${turnLimit} clues.`,
+  ];
+}
+
+export function createRoom(config: GameConfig = {}): Room {
+  const code = generateRoomCode((c) => rooms.has(c));
+  const now = Date.now();
+  const room = {
+    code,
+    mode: config.mode ?? "claude_spymaster",
+    createdAt: now,
+    updatedAt: now,
+  } as Room;
+  freshState(room, config);
+  rooms.set(code, room);
+  return room;
+}
+
+/** Fresh board on the same room code; mode can be switched for role reversal. */
+export function restartRoom(code: string, config: GameConfig = {}): Room {
+  const room = getRoom(code);
+  if (!room) throw new Error(`Room ${code} not found.`);
+  if (config.mode) room.mode = config.mode;
+  freshState(room, config);
   touch(room);
   return room;
 }
@@ -126,7 +130,6 @@ function normalize(word: string): string {
   return word.trim().toUpperCase();
 }
 
-/** A clue is illegal if it equals, contains, or is contained in an unrevealed board word. */
 export function clueViolation(room: Room, clue: string): string | null {
   const c = normalize(clue);
   if (!/^[A-Z][A-Z-]*$/.test(c)) {
@@ -143,13 +146,13 @@ export function clueViolation(room: Room, clue: string): string | null {
 
 export function giveClue(code: string, clueWord: string, count: number): Room {
   const room = getRoom(code);
-  if (!room) throw new Error(`Room ${code} not found. Create one with codenames_create_room.`);
+  if (!room) throw new Error(`Room ${code} not found.`);
   if (room.phase === "won" || room.phase === "lost") {
-    throw new Error(`The game in ${room.code} is over (${room.phase}). Use codenames_restart to play again.`);
+    throw new Error(`The game in ${room.code} is over (${room.phase}). Start a new game to continue.`);
   }
   if (room.phase === "guessing") {
     throw new Error(
-      `The guesser is still working on your previous clue ("${room.clues.at(-1)?.word}"). Wait for them to finish, then check codenames_get_state.`
+      `The guesser is still working on the previous clue ("${room.clues.at(-1)?.word}").`
     );
   }
   const violation = clueViolation(room, clueWord);
@@ -186,7 +189,7 @@ export function guess(code: string, word: string): Room {
   const room = getRoom(code);
   if (!room) throw new Error(`Room ${code} not found.`);
   if (room.phase !== "guessing") {
-    throw new Error("You can only guess after the spymaster has given a clue.");
+    throw new Error("A guess is only possible after the spymaster has given a clue.");
   }
   const w = normalize(word);
   const card = room.cards.find((c) => c.word === w);
@@ -215,7 +218,6 @@ export function guess(code: string, word: string): Room {
   return room;
 }
 
-/** The human voluntarily stops guessing and hands the turn back. */
 export function pass(code: string): Room {
   const room = getRoom(code);
   if (!room) throw new Error(`Room ${code} not found.`);
@@ -227,10 +229,25 @@ export function pass(code: string): Room {
 
 // ---------- Views ----------
 
-/** Full view for the spymaster (Claude). Includes hidden identities. */
-export function spymasterView(room: Room) {
+function board(room: Room, withKey: boolean) {
+  const over = room.phase === "won" || room.phase === "lost";
+  return room.cards.map((c) => ({
+    word: c.word,
+    revealed: c.revealed,
+    identity: withKey || c.revealed || over ? c.identity : null,
+  }));
+}
+
+/**
+ * View for Claude via MCP. Includes the key only in claude_spymaster mode —
+ * in reversed games the server keeps Claude honest by never sending it.
+ */
+export function mcpView(room: Room) {
+  const withKey = room.mode === "claude_spymaster";
   return {
     room_code: room.code,
+    mode: room.mode,
+    your_role: withKey ? "spymaster" : "guesser",
     phase: room.phase,
     turn: room.turn,
     turn_limit: room.turnLimit,
@@ -242,20 +259,18 @@ export function spymasterView(room: Room) {
           : room.guessesLeft
         : 0,
     last_clue: room.clues.at(-1) ?? null,
-    board: room.cards.map((c) => ({
-      word: c.word,
-      identity: c.identity,
-      revealed: c.revealed,
-    })),
+    board: board(room, withKey),
     log: room.log,
     ...(room.lostTo ? { lost_to_assassin: room.lostTo } : {}),
   };
 }
 
-/** Redacted view for the guesser's browser. Identities only for revealed cards. */
-export function guesserView(room: Room) {
+/** View for the human's browser. Includes the key only in human_spymaster mode. */
+export function browserView(room: Room) {
+  const withKey = room.mode === "human_spymaster";
   return {
     code: room.code,
+    mode: room.mode,
     phase: room.phase,
     turn: room.turn,
     turnLimit: room.turnLimit,
@@ -267,12 +282,7 @@ export function guesserView(room: Room) {
           : room.guessesLeft
         : 0,
     clue: room.clues.at(-1) ?? null,
-    board: room.cards.map((c) => ({
-      word: c.word,
-      revealed: c.revealed,
-      // Hidden identities are disclosed only once the game is over.
-      identity: c.revealed || room.phase === "won" || room.phase === "lost" ? c.identity : null,
-    })),
+    board: board(room, withKey),
     log: room.log.slice(-12),
     lostTo: room.lostTo ?? null,
   };
