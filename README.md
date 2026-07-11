@@ -75,4 +75,8 @@ In reversed mode the human's board shows the key as colored card edges (green = 
 - **No auth.** Room codes are the only secret (~400 combinations — fine among friends, not adversaries). Don't expose anything sensitive through this server.
 - The word pool is an original list of common English nouns; swap in your own in `src/words.ts` (any language works — the game is a great bilingual exercise).
 
+## The Window (phone camera bridge)
+
+The server also hosts **the Window**: Claude calls `window_create` and gives you a URL like `/eye/EMBER-421` to open **on your phone**. Press START, grant the camera, and Claude can then call `window_look` to receive a single frame as a true image it can see. Privacy rules, enforced by design: the camera runs only while the page is open and started; a photo is taken only when `window_look` is called; every capture flashes visibly on your screen; frames are delivered once and never stored. Close the page and the window is closed. An optional note field travels with the next frame.
+
 MIT licensed. Built to be forked: Duet-style two-sided keys, competitive two-team mode, or entirely different turn-based games all fit the same referee-server pattern.

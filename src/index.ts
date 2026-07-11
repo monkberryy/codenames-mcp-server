@@ -5,6 +5,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
+  createWindow,
+  deliverFrame,
+  getWindow,
+  isOpen,
+  poll,
+  requestLook,
+  sweepExpiredWindows,
+} from "./eye.js";
+import {
   createRoom,
   getRoom,
   giveClue,
@@ -183,6 +192,60 @@ Returns the outcome: agent (keep guessing if you have guesses left), bystander (
     }
   );
 
+  server.registerTool(
+    "window_create",
+    {
+      title: "Open a Camera Window",
+      description: `Create a Window: a page the human opens on their PHONE that, with their explicit consent (they must press START), lets Claude request single camera frames via window_look.
+
+Privacy by design: the camera only runs while the page is open with START pressed; a frame is captured ONLY when window_look is called; every capture flashes visibly on their screen; frames are delivered once and never stored.
+
+Returns { window_code, url }. Give the human the url to open on their phone.`,
+      inputSchema: {},
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async () => {
+      const w = createWindow();
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ window_code: w.code, url: `${PUBLIC_URL}/eye/${w.code}` }, null, 2),
+        }],
+      };
+    }
+  );
+
+  server.registerTool(
+    "window_look",
+    {
+      title: "Look Through the Window",
+      description: `Request ONE camera frame from the human's phone through an open Window. The phone page captures a single photo (with a visible flash on their screen) and returns it as an image Claude can actually see, plus any note the human typed.
+
+Requires the human to have the window page open with START pressed. Waits up to 30 seconds for the frame. Use sparingly and respectfully — each call takes a real photo of the human's surroundings.`,
+      inputSchema: {
+        window_code: z.string().min(3).describe('Window code, e.g. "EMBER-421"'),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ window_code }) => {
+      const frame = await requestLook(window_code);
+      if (!frame) {
+        return {
+          content: [{ type: "text", text: "The look timed out — no frame arrived within 30s. The page may have lost focus; ask the human to check the window page is open and try again." }],
+          isError: true,
+        };
+      }
+      const content: any[] = [
+        { type: "image", data: frame.imageBase64, mimeType: "image/jpeg" },
+      ];
+      const meta: string[] = [];
+      if (frame.facing) meta.push(`camera: ${frame.facing}`);
+      if (frame.note) meta.push(`note from the human: ${frame.note}`);
+      if (meta.length) content.push({ type: "text", text: meta.join(" | ") });
+      return { content };
+    }
+  );
+
   return server;
 }
 
@@ -271,6 +334,44 @@ app.post("/api/room/:code/clue", (req, res) => {
   }
 });
 
+// ---------- The Window (phone camera) ----------
+
+app.get("/api/eye/:code/poll", (req, res) => {
+  try {
+    res.json(poll(req.params.code));
+  } catch (err) {
+    res.status(404).json({ error: asMessage(err) });
+  }
+});
+
+app.post("/api/eye/:code/frame", express.json({ limit: "8mb" }), (req, res) => {
+  try {
+    const body = z.object({
+      image: z.string().min(100),
+      note: z.string().max(500).optional(),
+      facing: z.string().max(20).optional(),
+    }).parse(req.body);
+    const delivered = deliverFrame(req.params.code, {
+      imageBase64: body.image,
+      note: body.note,
+      facing: body.facing,
+    });
+    res.json({ delivered });
+  } catch (err) {
+    res.status(400).json({ error: asMessage(err) });
+  }
+});
+
+app.get("/api/eye/:code/status", (req, res) => {
+  const w = getWindow(req.params.code);
+  if (!w) { res.status(404).json({ error: "Window not found." }); return; }
+  res.json({ code: w.code, open: isOpen(w), looks: w.looks });
+});
+
+app.get("/eye/:code", (_req, res) => {
+  res.sendFile(path.join(publicDir, "eye.html"));
+});
+
 // ---------- Static UI ----------
 
 const publicDir = path.resolve(__dirname, "..", "public");
@@ -281,7 +382,7 @@ app.get("/room/:code", (_req, res) => {
 
 // ---------- Start ----------
 
-setInterval(sweepExpiredRooms, 60 * 60 * 1000).unref();
+setInterval(() => { sweepExpiredRooms(); sweepExpiredWindows(); }, 60 * 60 * 1000).unref();
 
 const port = parseInt(process.env.PORT ?? "3000", 10);
 app.listen(port, () => {

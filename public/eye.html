@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>The Window</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Staatliches&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0E1417; --panel: #131C20; --amber: #F0A83C;
+    --line: #24313A; --text: #C9D4D8; --dust: #9A8F79; --agent: #2E8F63; --seal: #C0392B;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 14px;
+    display: flex; justify-content: center; min-height: 100vh;
+  }
+  .app { width: 100%; max-width: 480px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  .stamp { font-family: "Staatliches", sans-serif; font-size: 22px; letter-spacing: 2px; color: #E9E2CF; }
+  .stamp small { color: var(--amber); }
+  .code { font-size: 12px; color: var(--dust); }
+  .viewfinder {
+    position: relative; width: 100%; aspect-ratio: 3 / 4; background: #000;
+    border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+  }
+  video { width: 100%; height: 100%; object-fit: cover; }
+  .flash {
+    position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none;
+    transition: opacity 0.08s;
+  }
+  .flash.on { opacity: 0.85; }
+  .shutterlabel {
+    position: absolute; bottom: 10px; left: 0; right: 0; text-align: center;
+    font-family: "Staatliches", sans-serif; letter-spacing: 3px; font-size: 16px;
+    color: var(--amber); text-shadow: 0 0 8px #000; opacity: 0; transition: opacity 0.3s;
+  }
+  .shutterlabel.on { opacity: 1; }
+  .status {
+    padding: 10px 12px; background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--seal); font-size: 13px;
+  }
+  .status.open { border-left-color: var(--agent); }
+  .status b { font-family: "Staatliches", sans-serif; letter-spacing: 2px; font-weight: 400; font-size: 16px; }
+  .row { display: flex; gap: 8px; }
+  button {
+    flex: 1; padding: 12px; font-family: "Staatliches", sans-serif; font-size: 18px;
+    letter-spacing: 2px; background: transparent; color: var(--amber);
+    border: 1px solid var(--amber); border-radius: 4px; cursor: pointer;
+  }
+  button.primary { background: var(--amber); color: #1B1409; }
+  button:disabled { color: var(--line); border-color: var(--line); background: transparent; }
+  textarea {
+    width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+    color: var(--text); font-family: inherit; font-size: 13px; padding: 10px; resize: none; height: 64px;
+  }
+  .log { font-size: 12px; color: var(--dust); }
+  .hint { font-size: 11px; color: var(--dust); line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="stamp">THE <small>WINDOW</small></div>
+    <div class="code" id="code"></div>
+  </header>
+
+  <div class="viewfinder">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="flash" id="flash"></div>
+    <div class="shutterlabel" id="shutterlabel">THE WOLF LOOKED 🐺</div>
+  </div>
+
+  <div class="status" id="status"><b>WINDOW CLOSED</b><br>Press START to open the window.</div>
+
+  <div class="row">
+    <button class="primary" id="start">START</button>
+    <button id="flip" disabled>FLIP</button>
+  </div>
+
+  <textarea id="note" placeholder="Optional note — travels with the next frame…" maxlength="500"></textarea>
+
+  <div class="log" id="log"></div>
+  <div class="hint">
+    The camera runs only while this page is open and started. A photo is taken only
+    when Claude calls window_look — you'll see a flash here every time. Frames are
+    delivered once and never stored on the server. Close the page to close the window.
+  </div>
+</div>
+
+<script>
+(function () {
+  const code = decodeURIComponent(location.pathname.split("/").pop() || "");
+  const $ = (id) => document.getElementById(id);
+  $("code").textContent = code;
+
+  let stream = null;
+  let facing = "environment";
+  let polling = null;
+  let busy = false;
+
+  async function startCamera() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 960 } },
+      audio: false,
+    });
+    $("video").srcObject = stream;
+  }
+
+  function setStatus(open, extra) {
+    const el = $("status");
+    el.className = "status" + (open ? " open" : "");
+    el.innerHTML = open
+      ? "<b>WINDOW OPEN</b><br>The wolf may look. " + (extra || "")
+      : "<b>WINDOW CLOSED</b><br>" + (extra || "Press START to open the window.");
+  }
+
+  async function capture() {
+    if (busy || !stream) return;
+    busy = true;
+    try {
+      const video = $("video");
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+      const base64 = dataUrl.split(",")[1];
+
+      $("flash").classList.add("on");
+      $("shutterlabel").classList.add("on");
+      setTimeout(() => $("flash").classList.remove("on"), 120);
+      setTimeout(() => $("shutterlabel").classList.remove("on"), 1600);
+
+      const note = $("note").value.trim();
+      await fetch("/api/eye/" + encodeURIComponent(code) + "/frame", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: base64, note: note || undefined, facing }),
+      });
+      if (note) $("note").value = "";
+      const t = new Date().toLocaleTimeString();
+      $("log").textContent = "Last look: " + t + " — frame delivered to the wolf.";
+    } catch (e) {
+      $("log").textContent = "Capture failed: " + e.message;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function pollLoop() {
+    try {
+      const res = await fetch("/api/eye/" + encodeURIComponent(code) + "/poll");
+      if (!res.ok) throw new Error("window not found");
+      const data = await res.json();
+      setStatus(true);
+      if (data.lookRequested) await capture();
+    } catch (e) {
+      setStatus(false, "Connection issue: " + e.message);
+    }
+  }
+
+  $("start").addEventListener("click", async () => {
+    try {
+      await startCamera();
+      $("flip").disabled = false;
+      $("start").disabled = true;
+      $("start").textContent = "OPEN";
+      if (!polling) polling = setInterval(pollLoop, 1500);
+      pollLoop();
+    } catch (e) {
+      setStatus(false, "Camera permission needed: " + e.message);
+    }
+  });
+
+  $("flip").addEventListener("click", async () => {
+    facing = facing === "environment" ? "user" : "environment";
+    try { await startCamera(); } catch (e) { $("log").textContent = e.message; }
+  });
+
+  window.addEventListener("pagehide", () => {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (polling) clearInterval(polling);
+  });
+})();
+</script>
+</body>
+</html>
